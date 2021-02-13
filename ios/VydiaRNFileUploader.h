@@ -1,4 +1,4 @@
-//  VydiaRNFileUploader.h
+// VydiaRNFileUploader.h
 
 #import <Foundation/Foundation.h>
 #import <MobileCoreServices/MobileCoreServices.h>
@@ -6,5 +6,5 @@
 #import <React/RCTBridgeModule.h>
 
 @interface VydiaRNFileUploader : RCTEventEmitter <RCTBridgeModule, NSURLSessionTaskDelegate>
-    (void)setCompletionHandlerWithIdentifier: (NSString *)identifier completionHandler: (void (^)())completionHandler;
++ (void)setCompletionHandlerWithIdentifier: (NSString *)identifier completionHandler: (void (^)(void))completionHandler;
 @end
