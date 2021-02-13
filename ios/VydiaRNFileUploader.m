@@ -3,12 +3,7 @@
 #import <React/RCTEventEmitter.h>
 #import <React/RCTBridgeModule.h>
 #import <Photos/Photos.h>
-
-@interface VydiaRNFileUploader : RCTEventEmitter <RCTBridgeModule, NSURLSessionTaskDelegate>
-{
-  NSMutableDictionary *_responsesData;
-}
-@end
+#import "VydiaRNFileUploader.h"
 
 @implementation VydiaRNFileUploader
 
@@ -16,9 +11,11 @@ RCT_EXPORT_MODULE();
 
 @synthesize bridge = _bridge;
 static int uploadId = 0;
-static RCTEventEmitter* staticEventEmitter = nil;
+static VydiaRNFileUploader* staticInstance = nil;
 static NSString *BACKGROUND_SESSION_ID = @"ReactNativeBackgroundUpload";
+NSMutableDictionary *_responsesData;
 NSURLSession *_urlSession = nil;
+void (^backgroundSessionCompletionHandler)(void) = nil;
 
 + (BOOL)requiresMainQueueSetup {
     return NO;
@@ -27,16 +24,16 @@ NSURLSession *_urlSession = nil;
 -(id) init {
   self = [super init];
   if (self) {
-    staticEventEmitter = self;
+    staticInstance = self;
     _responsesData = [NSMutableDictionary dictionary];
   }
   return self;
 }
 
 - (void)_sendEventWithName:(NSString *)eventName body:(id)body {
-  if (staticEventEmitter == nil)
+  if (staticInstance == nil)
     return;
-  [staticEventEmitter sendEventWithName:eventName body:body];
+  [staticInstance sendEventWithName:eventName body:body];
 }
 
 - (NSArray<NSString *> *)supportedEvents {
@@ -46,6 +43,25 @@ NSURLSession *_urlSession = nil;
         @"RNFileUploader-cancelled",
         @"RNFileUploader-completed"
     ];
+}
+
+- (void)startObserving {
+    // JS side is ready to receive events; create the background url session if necessary
+    // iOS will then deliver the tasks completed while the app was dead (if any)
+    NSString *appGroup = nil;
+    double delayInSeconds = 0.5;
+    dispatch_time_t popTime = dispatch_time(DISPATCH_TIME_NOW, delayInSeconds * NSEC_PER_SEC);
+    dispatch_after(popTime, dispatch_get_main_queue(), ^(void){
+        NSLog(@"RNBU startObserving: recreate urlSession if necessary");
+        [self urlSession:appGroup];
+    });
+}
+
+(void)setCompletionHandlerWithIdentifier: (NSString *)identifier completionHandler: (void (^)())completionHandler {
+    if ([BACKGROUND_SESSION_ID isEqualToString:identifier]) {
+        backgroundSessionCompletionHandler = completionHandler;
+        NSLog(@"RNBU did setBackgroundSessionCompletionHandler");
+    }
 }
 
 /*
@@ -189,7 +205,7 @@ RCT_EXPORT_METHOD(startUpload:(NSDictionary *)options resolve:(RCTPromiseResolve
             dispatch_group_wait(group, DISPATCH_TIME_FOREVER);
         }
 
-        NSURLSessionDataTask *uploadTask;
+        NSURLSessionUploadTask *uploadTask;
 
         if ([uploadType isEqualToString:@"multipart"]) {
             NSString *uuidStr = [[NSUUID UUID] UUIDString];
@@ -210,6 +226,7 @@ RCT_EXPORT_METHOD(startUpload:(NSDictionary *)options resolve:(RCTPromiseResolve
 
         uploadTask.taskDescription = customUploadId ? customUploadId : [NSString stringWithFormat:@"%i", thisUploadId];
 
+        NSLog(@"RNBU will start upload %i", thisUploadId);
         [uploadTask resume];
         resolve(uploadTask.taskDescription);
     }
@@ -233,6 +250,17 @@ RCT_EXPORT_METHOD(cancelUpload: (NSString *)cancelUploadId resolve:(RCTPromiseRe
         }
     }];
     resolve([NSNumber numberWithBool:YES]);
+}
+
+RCT_EXPORT_METHOD(canSuspendIfBackground) {
+    NSLog(@"RNBU canSuspendIfBackground");
+    dispatch_sync(dispatch_get_main_queue(), ^(void){
+        if (backgroundSessionCompletionHandler) {
+            backgroundSessionCompletionHandler();
+            NSLog(@"RNBU did call backgroundSessionCompletionHandler (canSuspendIfBackground)");
+            backgroundSessionCompletionHandler = nil;
+        }
+    });
 }
 
 - (NSData *)createBodyWithBoundary:(NSString *)boundary
@@ -314,6 +342,17 @@ didCompleteWithError:(NSError *)error {
             [self _sendEventWithName:@"RNFileUploader-error" body:data];
         }
     }
+
+    [session getTasksWithCompletionHandler:^(NSArray *dataTasks, NSArray *uploadTasks, NSArray *downloadTasks) {
+        for (NSUInteger i = 0, count = [uploadTasks count]; i < count; i++) {
+            NSURLSessionTask * newTask = uploadTasks[i];
+            if(newTask.state != NSURLSessionTaskStateCompleted) {
+                return;
+            }
+        }
+        [session finishTasksAndInvalidate];
+        _urlSession = nil;
+    }];
 }
 
 - (void)URLSession:(NSURLSession *)session
@@ -340,6 +379,24 @@ totalBytesExpectedToSend:(int64_t)totalBytesExpectedToSend {
         _responsesData[@(dataTask.taskIdentifier)] = responseData;
     } else {
         [responseData appendData:data];
+    }
+}
+
+- (void)URLSessionDidFinishEventsForBackgroundURLSession:(NSURLSession *)session {
+    if (backgroundSessionCompletionHandler) {
+        NSLog(@"RNBU Did Finish Events For Background URLSession (has backgroundSessionCompletionHandler)");
+        // This long delay is set as a security if the JS side does not call :canSuspendIfBackground: promptly
+        double delayInSeconds = 45.0;
+        dispatch_time_t popTime = dispatch_time(DISPATCH_TIME_NOW, delayInSeconds * NSEC_PER_SEC);
+        dispatch_after(popTime, dispatch_get_main_queue(), ^(void){
+            if (backgroundSessionCompletionHandler) {
+                backgroundSessionCompletionHandler();
+                NSLog(@"RNBU did call backgroundSessionCompletionHandler (timeout)");
+                backgroundSessionCompletionHandler = nil;
+            }
+        });
+    } else {
+        NSLog(@"RNBU Did Finish Events For Background URLSession (no backgroundSessionCompletionHandler)");
     }
 }
 
